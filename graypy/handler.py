@@ -1,4 +1,3 @@
-import sys
 import logging
 import json
 import zlib
@@ -9,18 +8,8 @@ import socket
 import math
 from logging.handlers import DatagramHandler
 
-
 WAN_CHUNK, LAN_CHUNK = 1420, 8154
 
-PY3 = sys.version_info[0] == 3
-
-
-if PY3:
-    string_type = str
-    integer_type = int,
-else:
-    string_type = basestring
-    integer_type = (int, long)
 
 
 class GELFHandler(DatagramHandler):
@@ -34,22 +23,27 @@ class GELFHandler(DatagramHandler):
     :param debugging_fields: Send debug fields if true (the default).
     :param extra_fields: Send extra fields on the log record to graylog
         if true (the default).
-    :param fqdn: Use fully qualified domain name of localhost as source 
+    :param fqdn: Use fully qualified domain name of localhost as source
         host (socket.getfqdn()).
     :param localname: Use specified hostname as source host.
+    :param field_converter: callable (or a string resolved to callable) which
+        converts LogRecord attributes to GELF message fields
     :param facility: Replace facility with specified value. If specified,
         record.name will be passed as `logger` parameter.
     """
-
     def __init__(self, host, port=12201, chunk_size=WAN_CHUNK,
-            debugging_fields=True, extra_fields=True, fqdn=False, 
-            localname=None, facility=None):
+                 debugging_fields=True, extra_fields=True, fqdn=False,
+                 localname=None, facility=None,
+                 field_converter='graypy.field_converters.flat'):
         self.debugging_fields = debugging_fields
         self.extra_fields = extra_fields
         self.chunk_size = chunk_size
         self.fqdn = fqdn
         self.localname = localname
         self.facility = facility
+        if not callable(field_converter):
+            field_converter = resolve_name(field_converter)
+        self.field_converter = field_converter
         DatagramHandler.__init__(self, host, port)
 
     def send(self, s):
@@ -61,8 +55,8 @@ class GELFHandler(DatagramHandler):
 
     def makePickle(self, record):
         message_dict = make_message_dict(
-            record, self.debugging_fields, self.extra_fields, self.fqdn, 
-	    self.localname, self.facility)
+            record, self.debugging_fields, self.extra_fields, self.fqdn,
+            self.localname, self.field_converter, self.facility)
         return zlib.compress(json.dumps(message_dict).encode('utf-8'))
 
 
@@ -91,7 +85,8 @@ class ChunkedGELF(object):
             yield self.encode(sequence, chunk)
 
 
-def make_message_dict(record, debugging_fields, extra_fields, fqdn, localname, facility=None):
+def make_message_dict(record, debugging_fields, extra_fields, fqdn, localname,
+                      field_converter, facility=None):
     if fqdn:
         host = socket.getfqdn()
     elif localname:
@@ -125,7 +120,7 @@ def make_message_dict(record, debugging_fields, extra_fields, fqdn, localname, f
         if pn is not None:
             fields['_process_name'] = pn
     if extra_fields:
-        fields = add_extra_fields(fields, record)
+        fields = add_extra_fields(fields, record, field_converter)
     return fields
 
 SYSLOG_LEVELS = {
@@ -141,7 +136,7 @@ def get_full_message(exc_info, message):
     return '\n'.join(traceback.format_exception(*exc_info)) if exc_info else message
 
 
-def add_extra_fields(message_dict, record):
+def add_extra_fields(message_dict, record, field_converter):
     # skip_list is used to filter additional fields in a log message.
     # It contains all attributes listed in
     # http://docs.python.org/library/logging.html#logrecord-attributes
@@ -155,9 +150,22 @@ def add_extra_fields(message_dict, record):
 
     for key, value in record.__dict__.items():
         if key not in skip_list and not key.startswith('_'):
-            if isinstance(value, (string_type, float) + integer_type):
-                message_dict['_%s' % key] = value
-            else:
-                message_dict['_%s' % key] = repr(value)
+            message_dict['_%s' % key] = field_converter(value)
 
     return message_dict
+
+
+def resolve_name(name):
+    """Resolve a dotted name to a global object."""
+    # copied from stdlib logging module (function _resolve)
+    name = name.split('.')
+    used = name.pop(0)
+    found = __import__(used)
+    for n in name:
+        used = used + '.' + n
+        try:
+            found = getattr(found, n)
+        except AttributeError:
+            __import__(used)
+            found = getattr(found, n)
+    return found

@@ -1,6 +1,6 @@
 import json
 from amqplib import client_0_8 as amqp
-from graypy.handler import make_message_dict
+from graypy.handler import make_message_dict, resolve_name
 from logging import Filter
 from logging.handlers import SocketHandler
 
@@ -26,17 +26,20 @@ class GELFRabbitHandler(SocketHandler):
     :param debugging_fields: Send debug fields if true (the default).
     :param extra_fields: Send extra fields on the log record to graylog
         if true (the default).
-    :param fqdn: Use fully qualified domain name of localhost as source 
+    :param fqdn: Use fully qualified domain name of localhost as source
         host (socket.getfqdn()).
     :param exchange_type: RabbitMQ exchange type (default 'fanout').
     :param localname: Use specified hostname as source host.
+    :param field_converter: callable (or a string resolved to callable) which
+        converts LogRecord attributes to GELF message fields
     :param facility: Replace facility with specified value. If specified,
         record.name will be passed as `logger` parameter.
     """
 
     def __init__(self, url, exchange='logging.gelf', debugging_fields=True,
             extra_fields=True, fqdn=False, exchange_type='fanout', localname=None,
-            facility=None, virtual_host='/'):
+            facility=None, virtual_host='/',
+            field_converter='graypy.field_converters.flat'):
         self.url = url
         parsed = urlparse(url)
         if parsed.scheme != 'amqp':
@@ -59,6 +62,9 @@ class GELFRabbitHandler(SocketHandler):
         self.localname = localname
         self.facility = facility
         self.virtual_host = virtual_host
+        if not callable(field_converter):
+            field_converter = resolve_name(field_converter)
+        self.field_converter = field_converter
         SocketHandler.__init__(self, host, port)
         self.addFilter(ExcludeFilter('amqplib'))
 
@@ -69,7 +75,7 @@ class GELFRabbitHandler(SocketHandler):
     def makePickle(self, record):
         message_dict = make_message_dict(
             record, self.debugging_fields, self.extra_fields, self.fqdn, self.localname,
-            self.facility)
+            self.field_converter, self.facility)
         return json.dumps(message_dict)
 
 
